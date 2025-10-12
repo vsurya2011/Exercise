@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Music Room</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.7/firebase-firestore-compat.js"></script>
     <style>
         /* Using a more modern, readable font */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;700&display=swap');
@@ -73,8 +76,7 @@
         }
         
         .input-group label {
-            display: flex;
-            align-items: center;
+            display: block;
             margin-bottom: 0.5rem;
             font-size: 1.1rem;
         }
@@ -140,13 +142,13 @@
             border: 2px dashed rgba(255, 255, 255, 0.4);
         }
         
-        #join-code-input {
+        #join-code-input, #song-url-input {
             width: 100%;
             padding: 1rem;
             border-radius: 15px;
             text-align: center;
             font-size: 1.2rem;
-            letter-spacing: 3px;
+            letter-spacing: 1px;
             text-transform: uppercase;
             border: 1px solid rgba(255, 255, 255, 0.3);
             background: rgba(255, 255, 255, 0.2);
@@ -204,16 +206,6 @@
             background: rgba(255, 255, 255, 0.4);
         }
         
-        /* Custom file input button */
-        #song-file-label {
-            display: inline-block;
-            background: linear-gradient(to top, #89f7fe, #66a6ff);
-        }
-        
-        #song-file-input {
-            display: none;
-        }
-        
         /* --- Message Box --- */
         #message-box {
             position: fixed;
@@ -247,15 +239,11 @@
             <h1 class="login-title">LOGIN</h1>
             <form id="login-form">
                 <div class="input-group">
-                    <label for="username">
-                        <span class="icon">👤</span> Username
-                    </label>
+                    <label for="username"><span class="icon">👤</span> Username</label>
                     <input type="text" id="username" name="username" placeholder="admin" required>
                 </div>
                 <div class="input-group">
-                    <label for="password">
-                        <span class="icon">🔒</span> Password
-                    </label>
+                    <label for="password"><span class="icon">🔒</span> Password</label>
                     <input type="password" id="password" name="password" placeholder="••••••••" required>
                 </div>
                 <button type="submit" class="btn btn-primary">Login Now</button>
@@ -277,9 +265,9 @@
             <h2>Create Room</h2>
             <p>Share this code with your friends:</p>
             <div id="room-code-display" class="room-code-display"></div>
-            <button id="copy-code-btn" class="btn btn-secondary">Copy Code</button>
-            <label for="song-file-input" id="song-file-label" class="btn btn-primary">Select a Song</label>
-            <input type="file" id="song-file-input" accept="audio/*">
+            <p style="margin-top: 1.5rem;">Enter a direct URL to a song (e.g., MP3):</p>
+            <input type="url" id="song-url-input" placeholder="https://example.com/song.mp3" required>
+            <button id="start-session-btn" class="btn btn-primary">Start Session</button>
             <button id="back-to-selection-btn-1" class="btn btn-secondary">Back</button>
         </div>
     </div>
@@ -302,9 +290,8 @@
             <p>Room: <strong id="player-room-code"></strong></p>
             <div id="song-name">No song selected</div>
             <audio id="audio-player" controls></audio>
-             <!-- Important Note -->
-            <p style="font-size: 0.8rem; opacity: 0.7; margin-top: 1rem;">
-                Note: Music sync is not available in this demo. Everyone in the room needs to select the same song to listen together.
+            <p id="guest-notice" style="font-size: 0.9rem; opacity: 0.8; margin-top: 1rem; display: none;">
+                Playback is controlled by the host.
             </p>
             <button id="leave-room-btn" class="btn btn-secondary">Leave Room</button>
         </div>
@@ -316,13 +303,29 @@
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
+
+            /* --- 1. YOUR FIREBASE CONFIG GOES HERE --- */
+            // To get this, create a new project at https://console.firebase.google.com/
+            // Add a "Web" app and copy the config object here.
+            const firebaseConfig = {
+                apiKey: "YOUR_API_KEY",
+                authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+                projectId: "YOUR_PROJECT_ID",
+                storageBucket: "YOUR_PROJECT_ID.appspot.com",
+                messagingSenderId: "YOUR_SENDER_ID",
+                appId: "YOUR_APP_ID"
+            };
+
+            // --- 2. Initialize Firebase and Firestore ---
+            firebase.initializeApp(firebaseConfig);
+            const db = firebase.firestore();
+            
             // --- Element References ---
             const screens = document.querySelectorAll('.screen');
             const loginForm = document.getElementById('login-form');
             const showCreateRoomBtn = document.getElementById('show-create-room-btn');
             const showJoinRoomBtn = document.getElementById('show-join-room-btn');
-            const copyCodeBtn = document.getElementById('copy-code-btn');
-            const songFileInput = document.getElementById('song-file-input');
+            const startSessionBtn = document.getElementById('start-session-btn');
             const joinRoomBtn = document.getElementById('join-room-btn');
             const leaveRoomBtn = document.getElementById('leave-room-btn');
             const backBtns = [document.getElementById('back-to-selection-btn-1'), document.getElementById('back-to-selection-btn-2')];
@@ -331,58 +334,93 @@
             const passwordInput = document.getElementById('password');
             const roomCodeDisplay = document.getElementById('room-code-display');
             const joinCodeInput = document.getElementById('join-code-input');
+            const songUrlInput = document.getElementById('song-url-input');
             const audioPlayer = document.getElementById('audio-player');
             const songNameDisplay = document.getElementById('song-name');
             const playerRoomCodeDisplay = document.getElementById('player-room-code');
             const messageBox = document.getElementById('message-box');
+            const guestNotice = document.getElementById('guest-notice');
             
             // --- State ---
             let currentRoomCode = '';
+            let isHost = false;
+            let roomUnsubscribe = null; // To stop listening to room updates when we leave
 
             // --- Helper Functions ---
-
-            /**
-             * Hides all screens and shows the one with the specified ID.
-             * @param {string} screenId The ID of the screen to show.
-             */
             function showScreen(screenId) {
-                screens.forEach(screen => {
-                    screen.classList.remove('active');
-                });
+                screens.forEach(screen => screen.classList.remove('active'));
                 const activeScreen = document.getElementById(screenId);
                 if (activeScreen) {
                     activeScreen.classList.add('active');
-                    // Update body background based on the active screen
-                    const bgImage = window.getComputedStyle(activeScreen).backgroundImage;
-                    document.body.style.backgroundImage = bgImage;
+                    document.body.style.backgroundImage = window.getComputedStyle(activeScreen).backgroundImage;
                 }
             }
             
-             /**
-             * Displays a feedback message to the user.
-             * @param {string} text The message to display.
-             * @param {string} type 'success' or 'error'.
-             */
             function showMessage(text, type = 'success') {
                 messageBox.textContent = text;
                 messageBox.className = type === 'error' ? 'error' : '';
                 messageBox.classList.add('show');
-                setTimeout(() => {
-                    messageBox.classList.remove('show');
-                }, 3000);
+                setTimeout(() => messageBox.classList.remove('show'), 3000);
             }
 
-            /**
-             * Generates a random 6-character alphanumeric room code.
-             * @returns {string} The generated room code.
-             */
             function generateRoomCode() {
                 return Math.random().toString(36).substring(2, 8).toUpperCase();
             }
 
+            // --- Real-time Sync Logic ---
+
+            function listenToRoomUpdates(roomCode) {
+                if (roomUnsubscribe) roomUnsubscribe(); // Stop listening to old room
+                
+                playerRoomCodeDisplay.textContent = roomCode;
+                const roomRef = db.collection('rooms').doc(roomCode);
+
+                roomUnsubscribe = roomRef.onSnapshot(doc => {
+                    if (!doc.exists) {
+                        showMessage('The host has ended the session.', 'error');
+                        leaveRoom();
+                        return;
+                    }
+                    const data = doc.data();
+
+                    // Sync Song URL
+                    if (audioPlayer.src !== data.songUrl) {
+                        audioPlayer.src = data.songUrl;
+                        songNameDisplay.textContent = data.songUrl.split('/').pop();
+                    }
+
+                    // Sync Play/Pause state
+                    if (data.isPlaying && audioPlayer.paused) {
+                        audioPlayer.play().catch(e => console.error("Autoplay failed:", e));
+                    } else if (!data.isPlaying && !audioPlayer.paused) {
+                        audioPlayer.pause();
+                    }
+
+                    // Sync playback time (only if the difference is significant)
+                    const timeDifference = Math.abs(audioPlayer.currentTime - data.currentTime);
+                    if (timeDifference > 2) { // 2 seconds threshold
+                        audioPlayer.currentTime = data.currentTime;
+                    }
+                });
+            }
+
+            function updateRoomState(roomCode, state) {
+                db.collection('rooms').doc(roomCode).update(state)
+                    .catch(error => console.error("Error updating room state: ", error));
+            }
+
+            function leaveRoom() {
+                if (roomUnsubscribe) {
+                    roomUnsubscribe();
+                    roomUnsubscribe = null;
+                }
+                audioPlayer.pause();
+                audioPlayer.src = '';
+                showScreen('room-selection-screen');
+            }
+
             // --- Event Listeners ---
 
-            // 1. Login Form Submission
             loginForm.addEventListener('submit', (e) => {
                 e.preventDefault();
                 if (usernameInput.value.trim() === 'admin' && passwordInput.value === '1234567') {
@@ -393,83 +431,91 @@
                 }
             });
 
-            // 2. Navigate to Create Room
             showCreateRoomBtn.addEventListener('click', () => {
+                isHost = true;
                 currentRoomCode = generateRoomCode();
                 roomCodeDisplay.textContent = currentRoomCode;
+                audioPlayer.controls = true; // Host can control playback
+                guestNotice.style.display = 'none';
                 showScreen('create-room-screen');
             });
 
-            // 3. Navigate to Join Room
+            startSessionBtn.addEventListener('click', async () => {
+                const songUrl = songUrlInput.value.trim();
+                if (!songUrl) {
+                    showMessage('Please enter a song URL.', 'error');
+                    return;
+                }
+                try {
+                    await db.collection('rooms').doc(currentRoomCode).set({
+                        songUrl: songUrl,
+                        isPlaying: false,
+                        currentTime: 0,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                    listenToRoomUpdates(currentRoomCode);
+                    showScreen('music-player-screen');
+                } catch (error) {
+                    console.error("Error creating room: ", error);
+                    showMessage('Could not create room.', 'error');
+                }
+            });
+
             showJoinRoomBtn.addEventListener('click', () => {
+                isHost = false;
                 joinCodeInput.value = '';
+                audioPlayer.controls = false; // Guests cannot control playback
+                guestNotice.style.display = 'block';
                 showScreen('join-room-screen');
             });
-            
-            // 4. Back Buttons
-            backBtns.forEach(btn => {
-                btn.addEventListener('click', () => showScreen('room-selection-screen'));
-            });
 
-            // 5. Copy Room Code
-            copyCodeBtn.addEventListener('click', () => {
-                // A temporary textarea is created to use the document.execCommand('copy')
-                const textArea = document.createElement('textarea');
-                textArea.value = currentRoomCode;
-                document.body.appendChild(textArea);
-                textArea.select();
-                try {
-                    document.execCommand('copy');
-                    showMessage('Room code copied to clipboard!');
-                } catch (err) {
-                    showMessage('Failed to copy code.', 'error');
+            joinRoomBtn.addEventListener('click', async () => {
+                const roomCode = joinCodeInput.value.trim().toUpperCase();
+                if (!roomCode) {
+                    showMessage('Please enter a room code.', 'error');
+                    return;
                 }
-                document.body.removeChild(textArea);
-            });
-
-            // 6. Host selects a song
-            songFileInput.addEventListener('change', (e) => {
-                const file = e.target.files[0];
-                if (file) {
-                    const objectUrl = URL.createObjectURL(file);
-                    audioPlayer.src = objectUrl;
-                    songNameDisplay.textContent = file.name;
-                    playerRoomCodeDisplay.textContent = currentRoomCode;
-                    audioPlayer.removeAttribute('disabled');
-                    showScreen('music-player-screen');
-                    audioPlayer.play();
-                }
-            });
-
-            // 7. Guest joins a room
-            joinRoomBtn.addEventListener('click', () => {
-                const enteredCode = joinCodeInput.value.trim().toUpperCase();
-                if (enteredCode) {
-                    playerRoomCodeDisplay.textContent = enteredCode;
-                    songNameDisplay.textContent = "Waiting for host to play a song...";
-                    // In this version, the guest also has to select the same file.
-                    // The player is enabled for them to do so.
-                    showMessage('Joined room! Please select the same song as the host.');
+                const roomRef = db.collection('rooms').doc(roomCode);
+                const doc = await roomRef.get();
+                if (doc.exists) {
+                    currentRoomCode = roomCode;
+                    listenToRoomUpdates(currentRoomCode);
                     showScreen('music-player-screen');
                 } else {
-                    showMessage('Please enter a room code.', 'error');
+                    showMessage('Room not found.', 'error');
                 }
             });
-            
-            // 8. Leave the music player room
-            leaveRoomBtn.addEventListener('click', () => {
-                 audioPlayer.pause();
-                 audioPlayer.src = '';
-                 // Reset file input so the same file can be chosen again
-                 songFileInput.value = ''; 
-                 showScreen('room-selection-screen');
+
+            backBtns.forEach(btn => btn.addEventListener('click', () => showScreen('room-selection-screen')));
+
+            leaveRoomBtn.addEventListener('click', async () => {
+                if (isHost) {
+                    try {
+                        // Host deletes the room when they leave
+                        await db.collection('rooms').doc(currentRoomCode).delete();
+                    } catch (error) {
+                        console.error("Error deleting room:", error);
+                    }
+                }
+                leaveRoom();
+            });
+
+            // --- Host's Audio Player Events ---
+            audioPlayer.addEventListener('play', () => {
+                if (isHost) updateRoomState(currentRoomCode, { isPlaying: true });
+            });
+            audioPlayer.addEventListener('pause', () => {
+                if (isHost) updateRoomState(currentRoomCode, { isPlaying: false, currentTime: audioPlayer.currentTime });
+            });
+            audioPlayer.addEventListener('seeked', () => {
+                if (isHost) updateRoomState(currentRoomCode, { currentTime: audioPlayer.currentTime });
             });
 
             // --- Initial Setup ---
-            // Set the initial background image from the login screen
             const initialBg = window.getComputedStyle(document.getElementById('login-screen')).backgroundImage;
             document.body.style.backgroundImage = initialBg;
         });
     </script>
 </body>
 </html>
+
